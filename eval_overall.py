@@ -7,11 +7,22 @@ random.seed(42)
 import shutil
 import time
 import re
+import textwrap
+import ast
 from pathlib import Path
 from tqdm import tqdm
 from argparse import ArgumentParser
 from copy import deepcopy
 from data_utils import read_jsonl
+from openai import OpenAI
+
+# Initialize OpenAI client once
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    print("Warning: OPENAI_API_KEY environment variable not set. Test regeneration will not work.")
+else:
+    openai_client = OpenAI(api_key=api_key)
+    print("OpenAI client initialized successfully")
 
 
 class TimeoutHandler:
@@ -43,8 +54,171 @@ def execute(test_code, timeout=5):
         return "timeout"  # Timed out
     except Exception as e:
         return "runtime_error", e  # Other runtime errors
-    
 
+
+def change_function_name(code, new_name):
+    """Change the name of the first function in the code to new_name."""
+    try:
+        # Parse the code into an AST
+        tree = ast.parse(code)
+
+        # Find the first function definition and change its name
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                if node.name != new_name:
+                    node.name = new_name
+                    break
+                else:
+                    break
+
+        # Convert the modified AST back to code
+        new_code = ast.unparse(tree)
+        return new_code
+    except Exception as e:  # cannot parse
+        return code
+
+
+def remove_extra(testcase, func_name, lang='python'):
+    """Remove extra test inputs and natural language descriptions before and after the test method.
+    Only keep the contents between def test() and solution.{func_name}"""
+    lines = testcase.split('\n')
+    func_startline = 0  # the line when test function starts (def test....)
+    for i in range(len(lines)):
+        if lines[i].find('def test') >= 0:
+            func_startline = i
+            break
+    test_endline = len(lines)
+    for i in range(len(lines)):
+        if lines[i].find(f'solution.{func_name}') >= 0:  # first call to the function under test
+            test_endline = i + 1
+            break
+    new_testcase = '\n'.join(lines[func_startline:test_endline])
+    return new_testcase
+
+
+def reformat_case_byrules(testcase, func_name, lang='python'):
+    """Reformat a test case by removing indents and changing function name if needed."""
+    if testcase.startswith(' '):  # remove extra indents
+        testcase = textwrap.dedent(testcase)
+    lines = testcase.split('\n')
+
+    if lang == 'python':
+        last_line = lines[-1]  # if last line is not complete (due to token limit), remove it
+        last_line = textwrap.dedent(last_line)
+        try:
+            compile(last_line, '<string>', 'exec')
+        except:
+            lines = lines[:-1]  # last line cannot compile
+
+    testcase = '\n'.join(lines)
+    testcase = change_function_name(testcase, func_name)
+    return testcase
+
+
+def regenerate_testcase(task_num, func_name, code, j, current_testcase, error_info, args, iteration_num):
+    """
+    Regenerate a test case using the specified OpenAI model when the current test case fails.
+    
+    Args:
+        task_num: The task number/ID
+        func_name: The name of the function under test
+        code: The code being tested
+        j: The test index
+        current_testcase: The current failing test case
+        error_info: The error information from the failed test
+        args: Command line arguments containing model configuration
+        iteration_num: Nth iteration of regeneration
+    
+    Returns:
+        A reformatted test case
+    """
+    
+    # Create system prompt for test generation
+    system_prompt = """You are an expert Python programmer specializing in test case generation. 
+When provided with code and a failing test, generate a new test case that avoids the error.
+Respond ONLY with Python code for the test case - no explanations, comments, or markdown."""
+    
+    # Format the error info for the prompt
+    error_description = str(error_info)
+    if isinstance(error_info, tuple):
+        error_description = f"Error type: {error_info[0]}, Message: {error_info[1]}"
+    
+    # Create user prompt with all required information
+    user_prompt = f"""The following Python test case failed:
+
+```python
+{current_testcase}
+```
+
+The error was: {error_description}
+
+This test was trying to test the following code:
+
+```python
+{code}
+```
+
+Generate a new test case that will work correctly. The test function should be named 'test_{func_name}' 
+and should begin with 'solution = Solution()'. Only include the test code, no explanations."""
+    
+    # Call the OpenAI API
+    try:
+        response = openai_client.chat.completions.create(
+            model=args.regen_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=args.regen_temperature,
+            max_tokens=args.regen_max_tokens
+        )
+        
+        # Extract the generated test case
+        generated_test = response.choices[0].message.content.strip()
+        
+        # Remove markdown code blocks if present
+        if generated_test.startswith("```python"):
+            generated_test = generated_test.replace("```python", "").replace("```", "").strip()
+        elif generated_test.startswith("```"):
+            generated_test = generated_test.replace("```", "").strip()
+        
+        # Process and reformat the test case
+        test_funcname = f'test_{func_name}'
+        extracted_testcase = remove_extra(generated_test, func_name)
+        reformatted_testcase = reformat_case_byrules(extracted_testcase, test_funcname, 'python')
+        
+        # Save the regenerated test case to a JSONL file
+        output_dir = Path('predictions')
+        output_dir.mkdir(exist_ok=True)
+        output_file = output_dir / f"regenerated_tests_{args.regen_model}_iteration_num{iteration_num}.jsonl"
+        
+        # Create entry to save
+        test_entry = {
+            "task_num": task_num,
+            "func_name": func_name,
+            "test_index": j,
+            "code": code,
+            "orginial_test": current_testcase,
+            "error": error_description,
+            "regenerated_test": reformatted_testcase,
+        }
+        
+        # Append to file if exists, create otherwise
+        if output_file.exists():
+            with open(output_file, 'a') as f:
+                f.write(json.dumps(test_entry) + '\n')
+        else:
+            with open(output_file, 'w') as f:
+                f.write(json.dumps(test_entry) + '\n')
+        
+        return reformatted_testcase
+        
+    except Exception as e:
+        print(f"Error calling OpenAI API: {e}")
+        # Return the original test case if regeneration fails
+        return current_testcase
+        
+    
 def coverage_at_k_sample(passed_tests, k, cov_command_prefix):
     """Compute coverage@k for a single program under test."""
     random.shuffle(passed_tests)
@@ -86,7 +260,7 @@ def coverage_at_k_sample(passed_tests, k, cov_command_prefix):
         
     
 
-def check_correctness(generated_data,ks=[1, 2, 5]):
+def check_correctness(generated_data, args, ks=[1, 2, 5]):
     """Compute syntactical and execution correctness (with coverage)."""
     total_cases=0
     total_syn_correct=0
@@ -139,15 +313,15 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
                             f.write(test_code_simple)
                         passed_tests.append(f'test_{j}.py')
                 else:
-                # Try to regenerate the test case up to 3 times for both assertion errors and other errors
-                    max_regenerations = 3
+                # Try to regenerate the test case up to N times for both assertion errors and other errors
+                    max_regenerations = args.regen_max_iteration
                     regeneration_count = 0
                     current_testcase = testcase
                     error_info = res[1] if isinstance(res, tuple) else res
 
                     while regeneration_count < max_regenerations:
                         # Call regenerate_testcase function to get a new test case
-                        new_testcase = regenerate_testcase(task_num, func_name, code, j, current_testcase, error_info )
+                        new_testcase = regenerate_testcase(task_num, func_name, code, j, current_testcase, error_info, args, regeneration_count+1)
                         current_testcase = new_testcase
 
                         # Try to execute the new test case
@@ -248,15 +422,30 @@ def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--path", type=str, default='totalcov_gpt-3.5-turbo.jsonl')
     parser.add_argument("--ks", type=int, nargs='+', default=[1, 2, 5])
+    # LLM parameters for test case regeneration
+    parser.add_argument("--regen_model", type=str, default='gpt-4o-mini', 
+                        choices=['gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini'],
+                        help='The OpenAI model to use for test regeneration')
+    parser.add_argument("--regen_temperature", type=float, default=0,
+                        help='Temperature for test regeneration')
+    parser.add_argument("--regen_max_tokens", type=int, default=256,
+                        help='Maximum number of tokens for test regeneration')
+    parser.add_argument("--regen_max_iteration", type=int, default=3,
+                        help="Maximum number of iterations for test regeneration for failed tests")
     return parser.parse_args()
 
 
 if __name__=='__main__':
     args=parse_args()
-    print(args.path)
-    print(args.ks)
+    print(f"Evaluation file: {args.path}")
+    print(f"Coverage k values: {args.ks}")
+    print(f"Regeneration model: {args.regen_model}")
+    print(f"Regeneration temperature: {args.regen_temperature}")
+    print(f"Regeneration max tokens: {args.regen_max_tokens}")
+    print(f"Regeneration max iteration': {args.regen_max_iteration}")
+    
     output_dir = Path('predictions')
     predictions=read_jsonl(output_dir / args.path)
-    print(len(predictions))
-
-    check_correctness(predictions, ks=args.ks)
+    print(f"Total predictions: {len(predictions)}")
+    
+    check_correctness(predictions, args, ks=args.ks)
