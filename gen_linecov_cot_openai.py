@@ -12,8 +12,7 @@ from data_utils import read_jsonl, write_jsonl, add_lineno, add_lineno_comment
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--dataset", type=str, default='leetcode')
-    parser.add_argument("--model", type=str, default='gpt-3.5-turbo')
-    
+    parser.add_argument("--model", type=str, default='gpt-4o-mini')
     parser.add_argument("--max_tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0)
     return parser.parse_args()

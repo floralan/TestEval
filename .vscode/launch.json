@@ -1,0 +1,21 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+      {
+          "name": "Debug eval cov",
+          "type": "python",
+          "request": "launch",
+          "program": "${workspaceFolder}/eval_overall.py",
+          "args": ["--path", "${workspaceFolder}/predictions/totalcov_gemini-2.0-flashformat.jsonl"],
+          "console": "integratedTerminal",
+          "justMyCode": false,
+          "env": {
+              "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+          },
+          "cwd": "${workspaceFolder}"
+      },
+  ]
+}

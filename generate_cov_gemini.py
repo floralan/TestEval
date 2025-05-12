@@ -16,7 +16,7 @@ def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--dataset", type=str, default='leetcode')
     parser.add_argument("--lang", type=str, default='python')
-    parser.add_argument("--model", type=str, default='models/gemini-1.0-pro-latest', choices=['models/gemini-1.0-pro-latest', 'models/gemini-1.5-pro-latest', 'models/gemini-1.5-flash-latest'])
+    parser.add_argument("--model", type=str, default='models/gemini-1.0-pro-latest', choices=['models/gemini-1.0-pro-latest', 'models/gemini-1.5-pro-latest', 'models/gemini-1.5-flash-latest', 'gemini-2.0-flash'])
     parser.add_argument("--num_tests", type=int, default=20, help='number of tests generated per program')
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--max_tokens", type=int, default=256)
@@ -55,7 +55,7 @@ if __name__=='__main__':
     #print(model)
     output_dir = Path('predictions')
 
-    dataset=read_jsonl('LC_data/leetcode-bench-py.jsonl')
+    dataset=read_jsonl('data/leetcode-py.jsonl')
 
     prompt_template=open('prompt/template_base.txt').read()
     system_template=open('prompt/system.txt').read()

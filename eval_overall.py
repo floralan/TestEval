@@ -30,21 +30,19 @@ class TimeoutHandler:
         raise TimeoutError(self.error_message)
     
 
-def execute(test_code,timeout=5):
-    """try to execute test code"""  
+def execute(test_code, timeout=5):
+    """Try to execute test code and classify the result"""
     try:
         exec_globals = {}
         with TimeoutHandler(timeout):
-            exec(test_code, globals()) 
-            return True
-    except AssertionError: #assertionerror is considered as executable
-        return True
+            exec(test_code, globals())
+            return "success"  # No errors
+    except AssertionError as e:
+        return "assertion_error", e  # Assertion failed
     except TimeoutError:
-        #print("timed out")
-        return False
+        return "timeout"  # Timed out
     except Exception as e:
-        #print(f"failed: {type(e).__name__}")
-        return type(e).__name__, e #return error type and error message
+        return "runtime_error", e  # Other runtime errors
     
 
 def coverage_at_k_sample(passed_tests, k, cov_command_prefix):
@@ -92,7 +90,8 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
     """Compute syntactical and execution correctness (with coverage)."""
     total_cases=0
     total_syn_correct=0
-    total_comp_correct=0
+    total_comp_correct=0 
+    total_assertion_correct = 0
     total_exec_correct=0
     syn_failed=0
 
@@ -127,17 +126,20 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
 
                 test_code=test_import+testcase+f'\ntest_{func_name}()'
                 time.sleep(0.01)
-                res=execute(test_code) 
-                if res==True:
+                res=execute(test_code)
+                if res == "success":
                     if test_code.find(f'solution.{func_name}')==-1: #if the function under test is not called, also consider as failed
                         print('func under test not called')
                         exec_fails.append({'task':task_num,'test_num':j,'error':'not called'})
                     else:
                         total_exec_correct+=1
+                        total_assertion_correct += 1
                         test_code_simple=test_import_simple+testcase #write to files for computing coverage
                         with open(f'tmp_{i}_{difficulty}/test_{j}.py','w') as f:
                             f.write(test_code_simple)
                         passed_tests.append(f'test_{j}.py')
+                elif isinstance(res, tuple) and res[0] == "assertion_error":
+                    total_exec_correct += 1
                 else:
                     exec_fails.append({'task':task_num,'test_num':j,'error':res})
                     #print(res)
@@ -192,7 +194,9 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
     
     syn_correct=total_syn_correct/total_cases
     exec_correct=total_exec_correct/total_cases
+    assertion_correct = total_assertion_correct / total_cases
     print(f'Syntax Correctness: {syn_correct}')
+    print(f'Assertion Correctness: {assertion_correct}')
     print(f'Executable Correctness: {exec_correct}')
 
     #compute average coverage@k
