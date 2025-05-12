@@ -1,4 +1,4 @@
-For the given code snippet and a list of conditions need to be satisfied, generate a test case that will satisfiy these conditions. Here is an example:
+For the given code snippet and a list of conditions need to be satisfied, generate a test case that will satisfy these conditions. Here is an example:
 [Example]
 Code:
 ```Python
@@ -18,9 +18,9 @@ class Solution: #1
         return []   #14
 ```
 Conditions:
-Step 1: If line 12 `return [i, numMap[complement]]` is executed, then the `if` condition `(complement in numMap and numMap[complement] != i)` in line 11 shoud be true.
+Step 1: If line 12 `return [i, numMap[complement]]` is executed, then the `if` condition `(complement in numMap and numMap[complement] != i)` in line 11 should be true.
 Step 2: If condition `complement in numMap` is true, at least one `target - nums[i]` in line 10 equals an element in nums, which means there exists two elements in `nums` that their sum is equal to `target`.
-Step 3: If condition `numMap[complement] != i` is ture, then `numMap[target - nums[i]] != i`, meaning that the index of `target - nums[i]` is not equal to `i`.
+Step 3: If condition `numMap[complement] != i` is true, then `numMap[target - nums[i]] != i`, meaning that the index of `target - nums[i]` is not equal to `i`.
 Step 4: Generally, to execute line 12, we need to ensure that there exists two different elements in `nums` that their sum is equal to `target`.
 
 Generated test case:

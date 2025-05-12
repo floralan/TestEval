@@ -116,7 +116,7 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
         with open(f'tmp_{i}_{difficulty}/under_test.py','w') as f: #write program under test and test cases into tmp files
             f.write(code)
         passed_tests=[]
-        
+
         for j, testcase in enumerate(test_cases):
             #testcase=textwrap.dedent(testcase)
             total_cases+=1
@@ -138,19 +138,50 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
                         with open(f'tmp_{i}_{difficulty}/test_{j}.py','w') as f:
                             f.write(test_code_simple)
                         passed_tests.append(f'test_{j}.py')
-                elif isinstance(res, tuple) and res[0] == "assertion_error":
-                    total_exec_correct += 1
                 else:
-                    exec_fails.append({'task':task_num,'test_num':j,'error':res})
-                    #print(res)
-                    #print(test_code)
+                # Try to regenerate the test case up to 3 times for both assertion errors and other errors
+                    max_regenerations = 3
+                    regeneration_count = 0
+                    current_testcase = testcase
+                    error_info = res[1] if isinstance(res, tuple) else res
+
+                    while regeneration_count < max_regenerations:
+                        # Call regenerate_testcase function to get a new test case
+                        new_testcase = regenerate_testcase(task_num, func_name, code, j, current_testcase, error_info )
+                        current_testcase = new_testcase
+
+                        # Try to execute the new test case
+                        test_code = test_import + current_testcase + f'\ntest_{func_name}()'
+                        time.sleep(0.01)
+                        res = execute(test_code)
+
+                        if res == "success":
+                            if test_code.find(f'solution.{func_name}') == -1:
+                                print('func under test not called')
+                                exec_fails.append({'task':task_num,'test_num':j,'error':'not called'})
+                                break
+                            else:
+                                total_exec_correct += 1
+                                total_assertion_correct += 1
+                                test_code_simple = test_import_simple + current_testcase
+                                with open(f'tmp_{i}_{difficulty}/test_{j}.py', 'w') as f:
+                                    f.write(test_code_simple)
+                                passed_tests.append(f'test_{j}.py')
+                                break
+
+                        regeneration_count += 1
+                        if isinstance(res, tuple):
+                            error_info = res[1]
+
+                    if regeneration_count == max_regenerations:
+                        exec_fails.append({'task':task_num, 'test_num':j, 'error': f'Failed after {max_regenerations} regenerations with the last error: {res}'})
 
             except:
                 syn_failed+=1
                 #print('syntax error')
                 #print(testcase)
                 pass
-        
+
         if len(passed_tests)>0: #start measuring coverage
             #total coverage for all tests
             cov_command_prefix=['pytest', '--cov=under_test', '--cov-branch', '--cov-report=json:coverage.json']
@@ -191,7 +222,7 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
         for dirname in dirnames:
             if remove_pattern.match(dirname):
                 shutil.rmtree(dirname)
-    
+
     syn_correct=total_syn_correct/total_cases
     exec_correct=total_exec_correct/total_cases
     assertion_correct = total_assertion_correct / total_cases
@@ -212,7 +243,7 @@ def check_correctness(generated_data,ks=[1, 2, 5]):
     print(f'Average Line Coverage: {avg_line_cov}, Average Branch Coverage: {avg_branch_cov}')
     return {'syn_correct':syn_correct,'exec_correct':exec_correct}, exec_fails
 
-    
+
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--path", type=str, default='totalcov_gpt-3.5-turbo.jsonl')
