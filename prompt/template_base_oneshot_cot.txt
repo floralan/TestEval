@@ -1,0 +1,58 @@
+You are an expert Python test writer. Follow this example carefully:
+
+Program under test:
+```python
+class Solution:
+    def twoSum(self, nums: List[int], target: int) -> List[int]:
+        numMap = {{}}
+        n = len(nums)
+        for i in range(n):
+            numMap[nums[i]] = i
+        for i in range(n):
+            complement = target - nums[i]
+            if complement in numMap and numMap[complement] != i:
+                return [i, numMap[complement]]
+        return []
+```
+
+Function description:
+Given an array of integers nums and an integer target, this function returns indices of the two numbers such that they add up to target.
+
+Think step by step about what kind of input would validate the function’s correctness.
+
+Reasoning:
+To test the `twoSum` function, I will:
+1. Initialize an instance of the `Solution` class.
+2. Provide a list of integers and a target value that has exactly one valid pair.
+3. Verify that the returned list contains the correct indices of the two numbers that sum to the target.
+
+Example input: nums = [2, 7, 11, 15], target = 9  
+Expected output: [0, 1], since nums[0] + nums[1] = 2 + 7 = 9.
+
+Test Function:
+```python
+def test_twoSum():
+    solution = Solution()
+    nums = [2, 7, 11, 15]
+    target = 9
+    expected_output = [0, 1]
+    assert solution.twoSum(nums, target) == expected_output
+```
+
+Now, using the same format, write a test function for the following function:
+
+Program under test:
+```python
+{program}
+```
+
+Function description for '{func_name}':
+{description}
+
+Think step by step and write your response in the same format: first include a Reasoning section, then write the test function.
+The test function should include one assert statement.
+Your test function should begin with:
+```python
+def test_{func_name}():
+    solution=Solution()
+```

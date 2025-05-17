@@ -15,15 +15,11 @@ from argparse import ArgumentParser
 from copy import deepcopy
 from data_utils import read_jsonl
 from openai import OpenAI
+import google.generativeai as genai
+from google.generativeai import GenerationConfig
 
-# Initialize OpenAI client once
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    print("Warning: OPENAI_API_KEY environment variable not set. Test regeneration will not work.")
-else:
-    openai_client = OpenAI(api_key=api_key)
-    print("OpenAI client initialized successfully")
-
+llm_client = None
+failed_generation_count = 0
 
 class TimeoutHandler:
     def __init__(self, timeout, error_message=None):
@@ -81,18 +77,18 @@ def change_function_name(code, new_name):
 def remove_extra(testcase, func_name, lang='python'):
     """Remove extra test inputs and natural language descriptions before and after the test method.
     Only keep the contents between def test() and solution.{func_name}"""
-    lines = testcase.split('\n')
-    func_startline = 0  # the line when test function starts (def test....)
+    lines=testcase.split('\n')
+    func_startline=0 #the line when test function starts (def test....)
     for i in range(len(lines)):
-        if lines[i].find('def test') >= 0:
-            func_startline = i
+        if lines[i].find('def test')>=0:
+            func_startline=i
             break
-    test_endline = len(lines)
+    test_endline=len(lines)
     for i in range(len(lines)):
-        if lines[i].find(f'solution.{func_name}') >= 0:  # first call to the function under test
-            test_endline = i + 1
+        if lines[i].find(f'solution.{func_name}')>=0: #first call to the function under test
+            test_endline=i+1
             break
-    new_testcase = '\n'.join(lines[func_startline:test_endline])
+    new_testcase='\n'.join(lines[func_startline:test_endline])
     return new_testcase
 
 
@@ -115,7 +111,7 @@ def reformat_case_byrules(testcase, func_name, lang='python'):
     return testcase
 
 
-def regenerate_testcase(task_num, func_name, code, j, current_testcase, error_info, args, iteration_num):
+def regenerate_testcase(task_num, func_name, code, j, current_testcase, res, args, iteration_num):
     """
     Regenerate a test case using the specified OpenAI model when the current test case fails.
     
@@ -125,7 +121,7 @@ def regenerate_testcase(task_num, func_name, code, j, current_testcase, error_in
         code: The code being tested
         j: The test index
         current_testcase: The current failing test case
-        error_info: The error information from the failed test
+        res: Excution result
         args: Command line arguments containing model configuration
         iteration_num: Nth iteration of regeneration
     
@@ -133,15 +129,17 @@ def regenerate_testcase(task_num, func_name, code, j, current_testcase, error_in
         A reformatted test case
     """
     
+    global failed_generation_count, llm_client
+    
     # Create system prompt for test generation
     system_prompt = """You are an expert Python programmer specializing in test case generation. 
 When provided with code and a failing test, generate a new test case that avoids the error.
 Respond ONLY with Python code for the test case - no explanations, comments, or markdown."""
     
     # Format the error info for the prompt
-    error_description = str(error_info)
-    if isinstance(error_info, tuple):
-        error_description = f"Error type: {error_info[0]}, Message: {error_info[1]}"
+    error_description = str(res)
+    if isinstance(res, tuple):
+        error_description = f"Error type: {res[0]}, Message: {str(res[1])}"
     
     # Create user prompt with all required information
     user_prompt = f"""The following Python test case failed:
@@ -161,20 +159,35 @@ This test was trying to test the following code:
 Generate a new test case that will work correctly. The test function should be named 'test_{func_name}' 
 and should begin with 'solution = Solution()'. Only include the test code, no explanations."""
     
-    # Call the OpenAI API
+    # Call LLM Client API
     try:
-        response = openai_client.chat.completions.create(
-            model=args.regen_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=args.regen_temperature,
-            max_tokens=args.regen_max_tokens
-        )
-        
-        # Extract the generated test case
-        generated_test = response.choices[0].message.content.strip()
+        generated_test = ''
+        if args.client == 'openAI':
+            response = llm_client.chat.completions.create(
+                model=args.regen_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=args.regen_temperature,
+                max_tokens=args.regen_max_tokens
+            )
+            
+            # Extract the generated test case
+            generated_test = response.choices[0].message.content.strip()
+        else:
+            final_prompt = system_prompt + '\n' + user_prompt
+            generation_config = GenerationConfig(
+                candidate_count=1,
+                max_output_tokens=args.regen_max_tokens,
+                temperature=args.regen_temperature
+            )
+            generated=llm_client.generate_content(final_prompt, generation_config=generation_config)
+            if generated.candidates[0].finish_reason==1: #normal stop
+                generated_test=generated.text
+            else:
+                generated_test=''
+                failed_generation_count+=1
         
         # Remove markdown code blocks if present
         if generated_test.startswith("```python"):
@@ -191,7 +204,7 @@ and should begin with 'solution = Solution()'. Only include the test code, no ex
         output_dir = Path('predictions')
         output_dir.mkdir(exist_ok=True)
         output_file = output_dir / f"regenerated_tests_{args.regen_model}_iteration_num{iteration_num}.jsonl"
-        
+
         # Create entry to save
         test_entry = {
             "task_num": task_num,
@@ -214,7 +227,8 @@ and should begin with 'solution = Solution()'. Only include the test code, no ex
         return reformatted_testcase
         
     except Exception as e:
-        print(f"Error calling OpenAI API: {e}")
+        print(f"Error calling LLM API: {e}")
+        failed_generation_count+=1
         # Return the original test case if regeneration fails
         return current_testcase
         
@@ -284,10 +298,10 @@ def check_correctness(generated_data, args, ks=[1, 2, 5]):
         func_name=data['func_name']
         code=data['code']
         test_cases=data['tests']
-        test_import=f'from tmp_{i}_{difficulty}.under_test import Solution\n'
+        test_import=f'from tmp_{i}_{difficulty}_{args.client}.under_test import Solution\n'
         test_import_simple=f'from under_test import Solution\n'
-        os.makedirs(f'tmp_{i}_{difficulty}',exist_ok=True) #create different tmp folders for different problems to avoid conflicts
-        with open(f'tmp_{i}_{difficulty}/under_test.py','w') as f: #write program under test and test cases into tmp files
+        os.makedirs(f'tmp_{i}_{difficulty}_{args.client}',exist_ok=True) #create different tmp folders for different problems to avoid conflicts
+        with open(f'tmp_{i}_{difficulty}_{args.client}/under_test.py','w') as f: #write program under test and test cases into tmp files
             f.write(code)
         passed_tests=[]
 
@@ -309,46 +323,52 @@ def check_correctness(generated_data, args, ks=[1, 2, 5]):
                         total_exec_correct+=1
                         total_assertion_correct += 1
                         test_code_simple=test_import_simple+testcase #write to files for computing coverage
-                        with open(f'tmp_{i}_{difficulty}/test_{j}.py','w') as f:
+                        with open(f'tmp_{i}_{difficulty}_{args.client}/test_{j}.py','w') as f:
                             f.write(test_code_simple)
                         passed_tests.append(f'test_{j}.py')
                 else:
-                # Try to regenerate the test case up to N times for both assertion errors and other errors
-                    max_regenerations = args.regen_max_iteration
-                    regeneration_count = 0
-                    current_testcase = testcase
-                    error_info = res[1] if isinstance(res, tuple) else res
+                    if args.run_debugger == 'false':
+                        if isinstance(res, tuple) and res[0] == "assertion_error":
+                            total_exec_correct += 1
+                        else:
+                            exec_fails.append({'task':task_num,'test_num':j,'error':res})
+                    else:
+                        # Try to regenerate the test case up to N times for both assertion errors and other errors
+                        max_regenerations = args.regen_max_iteration
+                        regeneration_count = 0
+                        current_testcase = testcase
 
-                    while regeneration_count < max_regenerations:
-                        # Call regenerate_testcase function to get a new test case
-                        new_testcase = regenerate_testcase(task_num, func_name, code, j, current_testcase, error_info, args, regeneration_count+1)
-                        current_testcase = new_testcase
+                        while regeneration_count < max_regenerations:
+                            # Call regenerate_testcase function to get a new test case
+                            new_testcase = regenerate_testcase(task_num, func_name, code, j, current_testcase, res, args, regeneration_count+1)
+                            current_testcase = new_testcase
 
-                        # Try to execute the new test case
-                        test_code = test_import + current_testcase + f'\ntest_{func_name}()'
-                        time.sleep(0.01)
-                        res = execute(test_code)
+                            # Try to execute the new test case
+                            test_code = test_import + current_testcase + f'\ntest_{func_name}()'
+                            time.sleep(0.01)
+                            res = execute(test_code)
 
-                        if res == "success":
-                            if test_code.find(f'solution.{func_name}') == -1:
-                                print('func under test not called')
-                                exec_fails.append({'task':task_num,'test_num':j,'error':'not called'})
-                                break
-                            else:
+                            if res == "success":
+                                if test_code.find(f'solution.{func_name}') == -1:
+                                    print('func under test not called')
+                                    exec_fails.append({'task':task_num,'test_num':j,'error':'not called'})
+                                    break
+                                else:
+                                    total_exec_correct += 1
+                                    total_assertion_correct += 1
+                                    test_code_simple = test_import_simple + current_testcase
+                                    with open(f'tmp_{i}_{difficulty}_{args.client}/test_{j}.py', 'w') as f:
+                                        f.write(test_code_simple)
+                                    passed_tests.append(f'test_{j}.py')
+                                    break
+
+                            regeneration_count += 1
+
+                        if regeneration_count == max_regenerations:
+                            if isinstance(res, tuple) and res[0] == "assertion_error":
                                 total_exec_correct += 1
-                                total_assertion_correct += 1
-                                test_code_simple = test_import_simple + current_testcase
-                                with open(f'tmp_{i}_{difficulty}/test_{j}.py', 'w') as f:
-                                    f.write(test_code_simple)
-                                passed_tests.append(f'test_{j}.py')
-                                break
-
-                        regeneration_count += 1
-                        if isinstance(res, tuple):
-                            error_info = res[1]
-
-                    if regeneration_count == max_regenerations:
-                        exec_fails.append({'task':task_num, 'test_num':j, 'error': f'Failed after {max_regenerations} regenerations with the last error: {res}'})
+                            else:
+                                exec_fails.append({'task':task_num, 'test_num':j, 'error': f'Failed after {max_regenerations} regenerations with the last error: {res}'})
 
             except:
                 syn_failed+=1
@@ -359,8 +379,8 @@ def check_correctness(generated_data, args, ks=[1, 2, 5]):
         if len(passed_tests)>0: #start measuring coverage
             #total coverage for all tests
             cov_command_prefix=['pytest', '--cov=under_test', '--cov-branch', '--cov-report=json:coverage.json']
-            subprocess.run(f'cp .coveragerc tmp_{i}_{difficulty}/.coveragerc',shell=True) #copy config file to tmp_folder
-            os.chdir(f'tmp_{i}_{difficulty}') #enter tmp_ folder for testing
+            subprocess.run(f'cp .coveragerc tmp_{i}_{difficulty}_{args.client}/.coveragerc',shell=True) #copy config file to tmp_folder
+            os.chdir(f'tmp_{i}_{difficulty}_{args.client}') #enter tmp_ folder for testing
             cov_command=deepcopy(cov_command_prefix)
             for test in passed_tests:
                 cov_command.append(test)
@@ -404,17 +424,51 @@ def check_correctness(generated_data, args, ks=[1, 2, 5]):
     print(f'Assertion Correctness: {assertion_correct}')
     print(f'Executable Correctness: {exec_correct}')
 
+    # Write results to results/correctness_results.jsonl in JSONL format
+    os.makedirs('results', exist_ok=True)
+    results = {
+        "Syntax Correctness": syn_correct,
+        "Assertion Correctness": assertion_correct,
+        "Executable Correctness": exec_correct
+    }
+    with open(f'results/correctness_results_{args.client}_{args.run_debugger}.jsonl', 'w') as f:
+        f.write(json.dumps(results) + '\n')
+
     #compute average coverage@k
+    coverage_results = {}
     for k in ks:
         line_covs_at_k[f'cov@{k}']=sum(line_covs_at_k[f'cov@{k}'])/len(generated_data)
         branch_covs_at_k[f'cov@{k}']=sum(branch_covs_at_k[f'cov@{k}'])/len(generated_data)
         print(f'line coverage@{k}',line_covs_at_k[f'cov@{k}'])
         print(f'branch coverage@{k}',branch_covs_at_k[f'cov@{k}'])
+        coverage_results[f'line_coverage@{k}'] = line_covs_at_k[f'cov@{k}']
+        coverage_results[f'branch_coverage@{k}'] = branch_covs_at_k[f'cov@{k}']
+
+    
 
     #compute coverage
     avg_line_cov=total_line_cov/len(generated_data)
     avg_branch_cov=total_branch_cov/len(generated_data)
     print(f'Average Line Coverage: {avg_line_cov}, Average Branch Coverage: {avg_branch_cov}')
+    coverage_results['avg_line_cov'] = avg_line_cov
+    coverage_results['avg_branch_cov'] = avg_branch_cov
+
+    # Write coverage@k results to results/coverage@k_results.jsonl in JSONL format
+    with open(f'results/coverage@k_results_{args.client}_{args.run_debugger}.jsonl', 'w') as f:
+        f.write(json.dumps(coverage_results) + '\n')
+
+    # Write execution failures to results/execution_fails.jsonl in JSONL format
+    with open(f'results/execution_fails_{args.client}_{args.run_debugger}.jsonl', 'w') as f:
+        for fail in exec_fails:
+            # Convert non-JSON-serializable objects (like IndexError) to strings
+            fail_copy = fail.copy()
+            if isinstance(fail_copy.get('error'), tuple) and len(fail_copy['error']) > 1 and isinstance(fail_copy['error'][1], Exception):
+                fail_copy['error'] = (fail_copy['error'][0], str(fail_copy['error'][1]))
+            elif isinstance(fail_copy.get('error'), Exception):
+                fail_copy['error'] = str(fail_copy['error'])
+            f.write(json.dumps(fail_copy) + '\n')
+
+    print(f'Failed generation count: {failed_generation_count}')
     return {'syn_correct':syn_correct,'exec_correct':exec_correct}, exec_fails
 
 
@@ -423,8 +477,10 @@ def parse_args():
     parser.add_argument("--path", type=str, default='totalcov_gpt-3.5-turbo.jsonl')
     parser.add_argument("--ks", type=int, nargs='+', default=[1, 2, 5])
     # LLM parameters for test case regeneration
+    parser.add_argument("--client", type=str, default='openAI',
+                        choices=['openAI', 'gemini'])
     parser.add_argument("--regen_model", type=str, default='gpt-4o-mini', 
-                        choices=['gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini'],
+                        choices=['gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gemini-2.0-flash'],
                         help='The OpenAI model to use for test regeneration')
     parser.add_argument("--regen_temperature", type=float, default=0,
                         help='Temperature for test regeneration')
@@ -432,6 +488,9 @@ def parse_args():
                         help='Maximum number of tokens for test regeneration')
     parser.add_argument("--regen_max_iteration", type=int, default=3,
                         help="Maximum number of iterations for test regeneration for failed tests")
+    parser.add_argument("--run_debugger", type=str, default='false',
+                        choices=['true', 'false'],
+                        help="Should run debugger or not")
     return parser.parse_args()
 
 
@@ -439,10 +498,33 @@ if __name__=='__main__':
     args=parse_args()
     print(f"Evaluation file: {args.path}")
     print(f"Coverage k values: {args.ks}")
+    print(f"LLM client: {args.client}")
     print(f"Regeneration model: {args.regen_model}")
     print(f"Regeneration temperature: {args.regen_temperature}")
     print(f"Regeneration max tokens: {args.regen_max_tokens}")
-    print(f"Regeneration max iteration': {args.regen_max_iteration}")
+    print(f"Regeneration max iteration: {args.regen_max_iteration}")
+    print(f"Run debugger: {args.run_debugger}")
+
+    if args.run_debugger == 'true':
+        if args.client == 'openAI':
+            # Initialize OpenAI client once
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                print("Warning: OPENAI_API_KEY environment variable not set. Test regeneration will not work.")
+            else:
+                llm_client = OpenAI(api_key=api_key)
+                print("OpenAI client initialized successfully")
+        elif args.client == 'gemini':
+            api_key=os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                print("Warning: GOOLE_API_KEY environment variable not set. Test regeneration will not work.")
+            else:
+                genai.configure(api_key=api_key)
+                llm_client = genai.GenerativeModel(args.regen_model)
+                print("Gemini client initialized successfully")
+        else:
+            print("Warning: not a valid LLM client")
+
     
     output_dir = Path('predictions')
     predictions=read_jsonl(output_dir / args.path)
